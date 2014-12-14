@@ -1,0 +1,166 @@
+---
+title: "Predict Quality of Activity"
+author: "sarigela"
+date: "Saturday, December 13, 2014"
+output: html_document
+---
+
+# Abstract
+Activity trackers such as Microsoft Band, Nike Fuel, Fit bit and many others are being used to capture lot of activities information. However, correctness or quality of the action is not provided. This project predicts the manner in which exercises are done by classifying them on scale of A to E. The prediction accuracy range for the final model developed is **99.39% - 99.59%**.
+
+# Exploratory Data Analysis
+The source of the data set is 'http://groupware.les.inf.puc-rio.br/har.' Two sets of data training and testing are downloaded to disc and loaded for anlysis. The outcome variable is factor `classe` with levels `A B C D E`
+
+``` {r echo=FALSE, results='hide'}
+## Getting the data & load it.
+library(data.table)
+if (!file.exists("data")) { dir.create("data")}  # Create test directory
+
+## Download data from URL if data does not exists already.
+if (!file.exists("./data/pml-training.csv"))
+{
+    trainDataURL <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+    download.file(trainDataURL, destfile = "./data/pml-training.csv")
+}
+if (!file.exists("./data/pml-testing.csv"))
+{
+    testDataURL <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+    download.file(testDataURL, destfile = "./data/pml-testing.csv")
+}
+mainTrainDataOrg = read.table("./data/pml-training.csv", sep = ",", header = T)
+mainTestData = read.table("./data/pml-testing.csv", sep = ",", header = T)
+
+## Exploratory analysis.
+names(mainTrainDataOrg); str(mainTrainDataOrg)
+str(mainTrainDataOrg$classe); summary(mainTrainDataOrg$classe)
+
+## Find all the Variables that are not useful in the prediction.
+##  This will be all variables which are having NA in Test/Training Data
+dummyCol <- names(mainTestData)[c(1,3:5)]
+allColNames <- names(mainTestData)
+for( i in 1:ncol(mainTestData))
+{
+    if (is.na(mainTestData[1,i]))
+    {
+        dummyCol <- c( dummyCol, allColNames[i])
+    }
+}
+neededCol = !names(mainTestData) %in% dummyCol  ## Needed Columns
+mainTrainData <- mainTrainDataOrg[, neededCol]     ## reduced train data set
+```
+From looking at the data, though *`r ncol(mainTrainDataOrg)`* variables are present some of them are either empty or having NA. We have *`r length(dummyCol)`* such variables which are being removed from the original training set giving us only *`r sum(neededCol==TRUE)`* variables for prediction.
+
+```{r echo=F, results='hide'}
+## Splitting the Main Training set to --> Training, Testing and Validation sets.
+#library(caret)
+inBuild <- createDataPartition(y=mainTrainData$classe, p = 0.7, list = FALSE)
+validation <- mainTrainData[-inBuild,]; buildData <- mainTrainData[inBuild,]
+inTrain <- createDataPartition(y=buildData$classe, p =0.7, list = FALSE)
+training <- buildData[inTrain,]; testing <- buildData[-inTrain,]
+```
+This trimmed down original training data is split into *3* partitions - `training`, sub-`testing` and `validation`.
+
+# Model fitting and cross-validation
+We need to build a model with outcome `classe` based all othe variables as predictors. Based on the data, the *linear regression models* such as lm, glm will not suite. Predicting with *Trees* is needed. The first model was tried with `method ="rpart"` that yeilded a poor accuracy of `52.33%`. Please refer Appendix for dendogram of the classification tree.
+
+```{r echo=F, results='hide'}
+modRPart <- train(classe ~ ., data = training, method = "rpart")
+```
+
+**Random Forest** method has been picked as the next alternative and found the accuracy to be `99.4%` with sampling *Cross-validated (5 folds)*. Increased the sampling *Cross-Validation* to `10 fold` to improve the accuracy to `99.5%` with `mtry=30`(model result in `modRF`). Parallel processing library `doSnow` used for high performance.
+
+# Combining predictors
+To get better prediction its always better to ensembel or combine multiple predictions. Hence, another model built with `method="treebag"` yeilding accuracy of `99.88%` on the sub-testing data set with 5 folds (model result in `modTreeBag`).
+
+```{r echo=F, results='hide'}
+## Set for Parallel processing:  To make precessing faster
+#install.packages("doSNOW")
+library("doSNOW")
+clust<-makeCluster(4) # Assign number of cores you want to use; in this case use 4 cores
+registerDoSNOW(clust) # Register the cores.
+
+modRF <- train(classe ~ ., data = training, method="rf",
+               trControl = trainControl(method = "cv", number = 10, allowParallel=TRUE))
+modTreeBag <- train(classe ~ ., data = training, method="treebag",
+    trControl = trainControl(method = "cv", number = 5, allowParallel=TRUE))
+stopCluster(clust) # Explicitly free up your cores again.
+
+## Predit using model on our sub-testing data
+pred1 <- predict(modRF, testing); pred2<-predict(modTreeBag,testing)
+```
+
+These two models applied over sub-`testing` set to get predictions (`pred1, pred2`). A new combined model `combofit` is generated using results - pred1, pred2 and `testing$classe`. 
+```{r echo=F, results='hide'}
+## fit model that combines the predictors
+predDF <- data.frame(pred1, pred2, classe = testing$classe)
+combofit <- train(classe ~ ., data=predDF)
+comboPred <- predict(combofit, predDF)
+```
+
+## Out of Sample error rate in sub testing data set
+The results of applying these models over sub-testing data set is computed and are as below:
+
+- The success percentage of the computed predictions for `modRF`, `modTreeBag` and `combofit` are **`r round(sum(pred1==testing$classe)/ dim(testing)[1] * 100, 2)`%, `r round(sum(pred2==testing$classe)/ dim(testing)[1] * 100, 2)`% and `r round(sum(comboPred==testing$classe)/dim(testing)[1]*100,2)`** respectively.
+
+- **Out of Sample Error** percentage of these three models is **`r round(sum(pred1!=testing$classe)/ dim(testing)[1] * 100, 2)`% , `r round(sum(pred2!=testing$classe)/ dim(testing)[1] * 100, 2)`% and `r round(sum(comboPred!=testing$classe)/ dim(testing)[1] * 100, 2)`% ** respectively.
+
+- From this data it is evident that our **combined model** of `combofit` gives better accuracy on our sub-traning model than other two.
+
+## Out of Sample error rate in *Validation* data Set
+The first two models are applied over validation set and predictions are fetched. The `combofit` model is applied on the resultant predictions from `modRF` and `modTreeBag`. The results of this are as follow:
+
+```{r echo=F, results='hide'}
+#Prediction on Validation Data Set
+pred1V <- predict(modRF, validation); pred2V <- predict(modTreeBag, validation)
+predVDF <- data.frame(pred1=pred1V, pred2=pred2V)
+comboPredV <- predict(combofit, predVDF)
+```
+
+- The success percentage of computed prediction for `modRF`, `modTreeBag` and `combofit` are **`r round(sum(pred1V==validation$classe)/dim(validation)[1]*100, 2)`%, `r round(sum(pred2V==validation$classe)/dim(validation)[1]*100, 2)`% and `r round(sum(comboPredV==validation$classe)/dim(validation)[1]*100, 2)`%** respectively.
+
+- **Out of Sample Error Rate** of these three models is **`r round(sum(pred1V!=validation$classe)/dim(validation)[1]*100,2)`%, `r round(sum(pred2V!=validation$classe)/dim(validation)[1]*100,2)`% and `r round(sum(comboPredV!=validation$classe)/dim(validation)[1]*100,2)`%** respectively.
+
+#Conclusion
+The combined model `combofit` is the final model that will be used for prediction with accuracy range of **`r round(sum(comboPredV==validation$classe)/dim(validation)[1]*100, 2)`% - `r round(sum(comboPred==testing$classe)/ dim(testing)[1] * 100, 2)`%**. The sample error rate rate is **`r round(sum(comboPredV!=validation$classe)/dim(validation)[1]*100,2)` - `r round(sum(comboPred!=testing$classe)/ dim(testing)[1] * 100, 2)`% ** which is very promising. 
+
+This model is used on the original test data and the results of the prediction are:
+```{r echo=FALSE, message=FALSE, error=FALSE }
+## Actual prediction on the Original Test Data Set.
+pred1T <- predict(modRF, mainTestData); pred2T <- predict(modTreeBag, mainTestData)
+predTDF <- data.frame(pred1 = pred1T, pred2 = pred2T)
+comboPredT <- predict(combofit, predTDF)
+comboPredT
+```
+
+**NOTE:** The percentange and figures are computed with actual R code in this report. Please refer the .RMD file to verify the code. Plots and results from the above experiment are presented in Appendix
+
+# Appendix
+### Classification Tree Dendrogram
+```{r echo=FALSE, message=FALSE, error=FALSE}
+#install.packages("rattle")  
+library(rattle)
+fancyRpartPlot(modRPart$finalModel)
+```
+
+### Random Tree Model Fit.
+```{r echo=FALSE}
+modRF
+```
+
+### Tree Bag Model Fit
+```{r echo=FALSE}
+modTreeBag
+```
+
+### Plot comparing the two model fits
+```{r echo=FALSE}
+library(ggplot2)
+qplot(pred1, pred2, color = classe, data=testing)
+```
+
+### Final Combined Predictors model fit
+```{r echo=FALSE}
+combofit
+```
+
+
